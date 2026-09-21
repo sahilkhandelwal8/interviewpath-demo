@@ -15,18 +15,42 @@ from .config import ROOT
 from .models import CallRecord, RunArtifact
 from .selection import canonical_url
 from .review import ReviewMetadata, REVIEW_INSTRUCTIONS
+from .response_format import model_json, source_quote, normalized
+from .review import ClaimSupport
 
 
 PROMPT_PATH = ROOT / "prompts" / "outreach-drafter.md"
 
 
 class OutreachDraft(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="ignore", strict=True)
 
     subject: str = Field(min_length=1)
     body: str = Field(min_length=1)
-    selection_reason: str = Field(min_length=1)
-    source_ids: list[str]
+    selection_reason: str = Field(default="Review the message and its supporting sources.", min_length=1)
+    source_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_formatting(cls, value):
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        if isinstance(value.get("subject"), str):
+            value["subject"] = " ".join(value["subject"].split())
+        if not isinstance(value.get("selection_reason"), str) or not value["selection_reason"].strip():
+            value["selection_reason"] = "Review the message and its supporting sources."
+        if isinstance(value.get("source_ids"), str):
+            value["source_ids"] = [value["source_ids"]] if value["source_ids"].strip() else []
+        if value.get("source_ids") is None:
+            value["source_ids"] = []
+        body = value.get("body")
+        if isinstance(body, str) and body.strip():
+            body = body.replace("\r\n", "\n").replace("\r", "\n").rstrip()
+            if not body.endswith("Maya Chen\nInterviewPath"):
+                body += "\nInterviewPath" if body.endswith("Maya Chen") else "\n\nMaya Chen\nInterviewPath"
+            value["body"] = body
+        return value
 
     @field_validator("subject", "body", "selection_reason")
     @classmethod
@@ -51,52 +75,83 @@ class OutreachDraft(BaseModel):
 
 
 class ReviewResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     draft: OutreachDraft | None
     review: ReviewMetadata
 
-    @model_validator(mode="before")
-    @classmethod
-    def append_fixed_signature(cls, value):
-        # Sender formatting belongs to the application. Preserve the raw model
-        # response separately, and never turn a blank body into a valid draft.
-        if not isinstance(value, dict) or not isinstance(value.get("draft"), dict):
-            return value
-        body = value["draft"].get("body")
-        if not isinstance(body, str) or not body.strip():
-            return value
-        body = body.rstrip()
-        signature = "Maya Chen\nInterviewPath"
-        if body.endswith(signature):
-            return value
-        if body.endswith("Maya Chen"):
-            body += "\nInterviewPath"
-        else:
-            body += "\n\n" + signature
-        return {**value, "draft": {**value["draft"], "body": body}}
 
 
 def validate_review(raw_response: str, draft_input: dict[str, Any]) -> ReviewResponse:
-    response = ReviewResponse.model_validate_json(raw_response)
-    if response.draft is None:
-        if not response.review.limitation or response.review.claims:
-            raise ValueError("A withheld draft requires a limitation and no draft claims")
-        return response
-    response.draft = validate_draft(response.draft.model_dump_json(), draft_input)
-    passages = {s["source_id"]: s["passage"] for s in draft_input["research_bundle"]["source_passages"]}
-    text = response.draft.subject + "\n" + response.draft.body
-    for claim in response.review.claims:
-        if claim.source_id not in response.draft.source_ids or claim.quote not in passages.get(claim.source_id, ""):
-            raise ValueError("Review references unavailable evidence")
-        if not claim.quote.strip() or claim.claim not in text:
-            raise ValueError("Review claim must occur in the draft")
-    if set(response.draft.source_ids) != {c.source_id for c in response.review.claims}:
-        raise ValueError("Every cited source must map to a draft claim")
-    if not response.review.claims and not response.review.limitation:
-        raise ValueError("Unpersonalized drafts require an evidence limitation")
-    if response.review.strength() == "Weak" and not response.review.limitation:
-        raise ValueError("Weak evidence requires a visible limitation")
-    return response
+    payload = model_json(raw_response)
+    if not isinstance(payload, dict):
+        raise ValueError("The model did not return a draft object")
+    if "draft" not in payload and "subject" in payload and "body" in payload:
+        payload = {"draft": payload}
+    raw_review = payload.get("review") if isinstance(payload.get("review"), dict) else {}
+    metadata = {key: raw_review[key] for key in ("angle", "explanation", "limitation")
+                if isinstance(raw_review.get(key), str) and raw_review[key].strip()}
+    review = ReviewMetadata(**metadata)
+    if payload.get("draft") is None:
+        review.limitation = review.limitation or "The available evidence did not support a draft. Add a source or refine the instructions."
+        return ReviewResponse(draft=None, review=review)
+    raw_draft = payload["draft"]
+    malformed_ids = False
+    if isinstance(raw_draft, dict):
+        raw_draft = dict(raw_draft)
+        ids = raw_draft.get("source_ids")
+        if ids is not None and not isinstance(ids, (list, str)):
+            raw_draft["source_ids"], malformed_ids = [], True
+        elif isinstance(ids, list) and any(not isinstance(item, str) for item in ids):
+            raw_draft["source_ids"], malformed_ids = [item for item in ids if isinstance(item, str)], True
+    draft = OutreachDraft.model_validate(raw_draft)
+    available = {s["source_id"]: s for s in draft_input["research_bundle"]["source_passages"]}
+    declared = set(draft.source_ids)
+    incomplete = malformed_ids or bool(declared - available.keys())
+    text = draft.subject + "\n" + draft.body
+    raw_claims = raw_review.get("claims") or []
+    if not isinstance(raw_claims, list):
+        raw_claims, incomplete = [], True
+    for item in raw_claims:
+        if not isinstance(item, dict):
+            incomplete = True
+            continue
+        item = dict(item)
+        source = available.get(item.get("source_id")) if isinstance(item.get("source_id"), str) else None
+        quote = source_quote(item.get("quote"), source["passage"]) if source else None
+        if not quote or not isinstance(item.get("claim"), str) or not item["claim"].strip() or normalized(item["claim"]) not in normalized(text):
+            incomplete = True
+            continue
+        item["quote"] = quote
+        if not isinstance(item.get("publisher"), str) or not item["publisher"].strip():
+            from urllib.parse import urlparse
+            item["publisher"] = urlparse(source["url"]).hostname or "Source"
+        for key, choices, fallback in [
+            ("support", ["Direct", "Partial", "Unclear"], "Unclear"),
+            ("source", ["First-party", "Authoritative secondary", "Index-only/other"], "Index-only/other"),
+            ("timing", ["Dated and suitable", "Historical", "Undated/not material"], "Undated/not material"),
+            ("consistency", ["No conflict found", "Material conflict"], "Material conflict"),
+        ]:
+            value = item.get(key)
+            matched = next((choice for choice in choices if isinstance(value, str) and choice.lower() == value.strip().lower()), None)
+            item[key] = matched or fallback
+            if matched is None:
+                incomplete = True
+        try:
+            review.claims.append(ClaimSupport.model_validate(item))
+        except ValidationError:
+            incomplete = True
+    cited = {claim.source_id for claim in review.claims}
+    incomplete = incomplete or bool(declared - cited)
+    draft.source_ids = list(dict.fromkeys(claim.source_id for claim in review.claims))
+    review.assessment_incomplete = incomplete
+    if incomplete:
+        warning = "Some claims could not be linked reliably to the selected evidence. Check or edit those claims before using this draft."
+        review.limitation = warning + (" " + review.limitation if review.limitation else "")
+    elif not review.claims:
+        review.limitation = review.limitation or "No personalized claims were linked to source evidence. Review the message before using it."
+    elif review.strength() == "Weak":
+        review.limitation = review.limitation or "Some claims have uncertain or conflicting support. Check them against the sources before using the draft."
+    return ReviewResponse(draft=draft, review=review)
 
 
 class DraftArtifact(BaseModel):
@@ -198,7 +253,7 @@ def build_draft_input(
 
 
 def validate_draft(raw_response: str, draft_input: dict[str, Any]) -> OutreachDraft:
-    draft = OutreachDraft.model_validate_json(raw_response)
+    draft = OutreachDraft.model_validate(model_json(raw_response))
     available = {
         source["source_id"] for source in draft_input["research_bundle"]["source_passages"]
     }

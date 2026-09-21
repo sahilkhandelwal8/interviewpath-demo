@@ -316,7 +316,7 @@ class Workspace:
                     if area["status"] == "searching":
                         area["status"] = "failed"
                 self.save(self.runs[run_id])
-            if not any(p.usable for p in artifact.pages if not p.page_id.startswith("IDENTITY-")):
+            if artifact.status in ("failed", "timed_out") and not any(p.usable for p in artifact.pages if not p.page_id.startswith("IDENTITY-")):
                 self.update(run_id, status="failed", error="Research returned no usable passages. Retry research or edit the prospect.")
                 return
             self.update(run_id, stage="draft", stage_started_at=now())

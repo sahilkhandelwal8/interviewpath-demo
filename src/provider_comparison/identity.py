@@ -5,7 +5,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
@@ -17,23 +16,24 @@ from .config import ROOT, Settings
 from .models import CallRecord, Prospect, Query, ResearchArea, RetrievedPage
 from .providers import create_provider
 from .selection import canonical_url
+from .response_format import model_json, source_quote
 
 
 class EvidenceRef(BaseModel):
     source_id: str
-    quote: str = Field(min_length=1)
+    quote: str = ""
 
 
 class MatchedField(BaseModel):
-    value: str | None
-    evidence: list[EvidenceRef]
+    value: str | None = None
+    evidence: list[EvidenceRef] = Field(default_factory=list)
 
 
 class Candidate(BaseModel):
     name: MatchedField
     company: MatchedField
     role: MatchedField
-    note: str
+    note: str = ""
     company_conflict_evidence: list[EvidenceRef] = Field(default_factory=list,
         description="Exact quotes listing a different current employer from the candidate company, when supplied evidence does not explain the relationship. Empty only when no unresolved employer discrepancy exists.")
 
@@ -44,9 +44,9 @@ class Candidate(BaseModel):
 
 
 class MatchSummary(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     candidates: list[Candidate] = Field(max_length=3)
-    summary: str = Field(min_length=1)
+    summary: str = "Review the identity details against the available sources."
     explanation_evidence: list[EvidenceRef] = Field(default_factory=list,
         description="Sources and exact quotes supporting summary or candidate notes, including discrepancies")
 
@@ -87,37 +87,12 @@ def reconcile_evidence(result: MatchSummary, sources: list[RetrievedPage]) -> Ma
     result = result.model_copy(deep=True)
     passages = {s.page_id: s.content for s in sources if s.usable}
 
-    def normalize(text):
-        return " ".join(text.translate(str.maketrans({
-            "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
-        })).split())
-
     def reconcile(refs):
         supported = []
         for ref in refs:
-            passage = passages.get(ref.source_id, "")
-            if not passage or not ref.quote.strip():
-                continue
-            if ref.quote in passage:
-                supported.append(ref)
-                continue
-            quote, source = normalize(ref.quote), normalize(passage)
-            if quote in source:
-                supported.append(ref.model_copy(update={"quote": passage}))
-                continue
-            # Ellipses may omit text, but cannot invent or reorder it. Keep the
-            # entire original passage rather than endorse the model's abridgment.
-            parts = [part.strip() for part in re.split(r"\.{3,}|\u2026", quote) if part.strip()]
-            if len(parts) < 2:
-                continue
-            position = 0
-            for part in parts:
-                start = source.find(part, position)
-                if start < 0:
-                    break
-                position = start + len(part)
-            else:
-                supported.append(ref.model_copy(update={"quote": passage}))
+            quote = source_quote(ref.quote, passages.get(ref.source_id, ""))
+            if quote:
+                supported.append(ref.model_copy(update={"quote": quote}))
         return supported
 
     explanations = reconcile(result.explanation_evidence)
@@ -265,7 +240,7 @@ async def summarize_lookup(lookup: IdentityLookup, settings: Settings, *, client
             call.usage = usage.model_dump(mode="json") if hasattr(usage, "model_dump") else dict(usage or {})
             if getattr(response, "status", "completed") != "completed":
                 raise ValueError("Incomplete model response")
-            result = reconcile_evidence(MatchSummary.model_validate_json(lookup.raw_response), lookup.sources)
+            result = reconcile_evidence(MatchSummary.model_validate(model_json(lookup.raw_response)), lookup.sources)
             validate_matches(result, lookup.sources)
             lookup.result = result
             call.success = True

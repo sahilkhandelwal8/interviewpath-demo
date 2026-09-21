@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ClaimSupport(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     claim: str = Field(min_length=1, description="Exact material personalized claim copied from the draft")
     source_id: str
     quote: str = Field(min_length=1, description="Exact substring of the supplied source passage")
@@ -17,15 +17,16 @@ class ClaimSupport(BaseModel):
 
 
 class ReviewMetadata(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    angle: str = Field(min_length=1)
-    explanation: str = Field(min_length=1)
-    limitation: str | None
-    claims: list[ClaimSupport]
+    model_config = ConfigDict(extra="ignore")
+    angle: str = Field(default="Outreach introduction", min_length=1)
+    explanation: str = Field(default="Review the message and its supporting sources.", min_length=1)
+    limitation: str | None = None
+    claims: list[ClaimSupport] = Field(default_factory=list)
+    assessment_incomplete: bool = False
 
     def strength(self) -> str:
         # V1 passages are index-only: source authority does not imply full-page access.
-        if not self.claims:
+        if self.assessment_incomplete or not self.claims:
             return "Not assessed"
         if any(c.support != "Direct" or c.consistency == "Material conflict" for c in self.claims):
             return "Weak"
