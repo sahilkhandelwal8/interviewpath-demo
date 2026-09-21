@@ -8,7 +8,7 @@ const stages = ["identify","research","draft","review"];
 const labels = {identify:"Identify",research:"Research",draft:"Draft",review:"Review"};
 const areas = {professional_profile:"Professional background",company_developments:"Company developments",recruiting_context:"Recruiting context"};
 const statuses = {running:"In progress",needs_input:"Needs your input",failed:"Needs attention",ready:"Ready to review"};
-let current=null, view=null, currentId=null, missing=[], sources=[], editFrom=null, busy=false, pollBusy=false, saveTimer=null, editingDraft=false, demoProspects=[], productBrief="";
+let current=null, view=null, currentId=null, missing=[], sources=[], editFrom=null, busy=false, pollBusy=false, saveTimer=null, editingDraft=false, editingIdentity=false, demoProspects=[], productBrief="";
 let noticeTimer;
 let researchTab="professional_profile";
 
@@ -36,7 +36,7 @@ function newView(prefill=null){
   history().catch(()=>{});
 }
 async function openRun(id){
-  currentId=id;view=null;editFrom=null;editingDraft=false;researchTab="professional_profile";location.hash=id;
+  currentId=id;view=null;editFrom=null;editingDraft=false;editingIdentity=false;researchTab="professional_profile";location.hash=id;
   try {const r=await api("/api/runs/"+id);if(currentId!==id)return;current=r;view=r.stage;render();await history();}catch(e){notify(e.message);}
 }
 function render(){
@@ -67,21 +67,34 @@ function identitySources(identity){
   }
   return [...grouped.values()].map(item=>({...item,content:item.passages.join("\n\n")}));
 }
+function identityEditForm(candidate){
+  const entered=current.identity?.entered||current.prospect;
+  const p={name:candidate?.name?.value||entered.name,company:candidate?.company?.value||entered.company,role:candidate?.role?.value||entered.role,profile_url:entered.profile_url||""};
+  return `<form id="identity-edit-form" class="card identity-edit">
+    <div class="candidate-top"><h3>Edit prospect details</h3><button class="text-button" type="button" data-action="cancel-identity-edit">Cancel</button></div>
+    <input type="hidden" name="candidate" value="${esc(candidate?.index??0)}">
+    <div class="field-pair"><label class="field" for="identity-name">Full name<input id="identity-name" name="name" required maxlength="160" value="${esc(p.name)}" autocomplete="off"></label><label class="field" for="identity-company">Company<input id="identity-company" name="company" required maxlength="160" value="${esc(p.company)}" autocomplete="off"></label></div>
+    <label class="field" for="identity-role">Role<input id="identity-role" name="role" required maxlength="200" value="${esc(p.role)}" autocomplete="off"></label>
+    <label class="field" for="identity-profile">LinkedIn URL <span class="optional">Optional</span><input id="identity-profile" name="profile_url" type="url" maxlength="2000" value="${esc(p.profile_url||"")}" placeholder="https://www.linkedin.com/in/..."></label>
+    <div id="identity-edit-error" class="inline-error" role="alert"></div>
+    <div class="actions"><button class="primary" type="submit">Save and continue &rarr;</button></div>
+  </form>`;
+}
 function identifyView(){
   const r=current,identity=r.identity;
   if(r.stage==="identify"&&r.status==="running")return running("Checking identity and current role","We’ll show the match and supporting sources for you to confirm.");
   if(r.stage==="identify"&&r.status==="failed")return errorPanel();
   if(!identity)return "";
   const evidence=identitySources(identity);
-  return `<div class="section-heading"><div><h2>${identity.confirmation_label?"Confirmed prospect":"Confirm the right person"}</h2><p>${identity.confirmation_label?"Confirmed by you · identity and employment context only":"Research starts only after you confirm a match."}</p></div>${!identity.confirmation_label?'<button class="secondary" data-action="edit">Edit details</button>':""}</div>
+  return `<div class="section-heading"><div><h2>${identity.confirmation_label?"Confirmed prospect":"Confirm the right person"}</h2><p>${identity.confirmation_label?"Confirmed by you · identity and employment context only":"Research starts only after you confirm a match."}</p></div>${!identity.confirmation_label?'<button class="secondary" data-action="edit-identity">Edit details</button>':""}</div>
     <p class="muted small">${esc(identity.summary)}</p>
-    ${identity.candidates.length?identity.candidates.map(c=>`<article class="card candidate">
+    ${identity.candidates.length?(editingIdentity?identityEditForm(identity.candidates[0]):identity.candidates.map(c=>`<article class="card candidate">
       <div class="candidate-top"><h3>${esc(c.name.value||"Name unclear")}</h3>${identity.confirmed_candidate_index===c.index?'<span class="badge ready">✓ Confirmed by you</span>':""}</div>
       <dl><dt>Current role</dt><dd>${esc(c.role.value||"Not established")}</dd><dt>Company</dt><dd>${esc(c.company.value||"Not established")}</dd></dl>
       ${c.note?`<p class="small muted">${esc(c.note)}</p>`:""}
-      ${c.company_conflict_evidence.length?'<div class="warning"><strong>Clarification needed</strong>The sources name different employers. Edit the details or add a profile URL so we can check again.</div>':!c.can_confirm?'<div class="warning">Some identity details could not be established. Edit the details or add a profile URL.</div>':""}
-      ${!identity.confirmation_label?`<div class="actions"><button class="primary" data-confirm="${c.index}" ${!c.can_confirm?"disabled":""}>Confirm and continue →</button></div>`:""}
-    </article>`).join(""):`<div class="card"><h3>We need a little more information</h3><p class="muted">Check the name, company and role, or add a LinkedIn URL to distinguish this person.</p>${buttons()}</div>`}
+      ${c.company_conflict_evidence.length?'<div class="warning"><strong>Clarification needed</strong>If this is the right person and company, confirm and continue. Or edit the details and continue with your resolved version.</div>':!c.can_confirm?'<div class="warning">Some identity details could not be established. Edit the details or add a profile URL.</div>':""}
+      ${!identity.confirmation_label?`<div class="actions"><button class="primary" data-confirm="${c.index}" ${c.company_conflict_evidence.length?'data-allow-conflict="true"':""} ${!c.can_confirm_with_clarification?"disabled":""}>${c.company_conflict_evidence.length?"Confirm and continue anyway":"Confirm and continue"} &rarr;</button></div>`:""}
+    </article>`).join("")):`<div class="card"><h3>We need a little more information</h3><p class="muted">Check the name, company and role, or add a LinkedIn URL to distinguish this person.</p>${buttons()}</div>`}
     ${evidence.length?`<div class="identity-sources"><h3>Sources · ${evidence.length}</h3>${evidence.map(sourceButton).join("")}</div>`:""}`;
 }
 function researchView(){
@@ -181,6 +194,11 @@ async function mutate(action,data={}){
 }
 document.addEventListener("invalid",e=>{if(e.target.closest("#prospect-fields"))$("#prospect-fields").open=true;},true);
 document.addEventListener("submit",async e=>{
+  if(e.target.id==="identity-edit-form"){
+    e.preventDefault();if(busy)return;busy=true;const button=e.target.querySelector("button[type=submit]");button.disabled=true;
+    try{const result=await api(`/api/runs/${currentId}/update`,Object.fromEntries(new FormData(e.target)));current=result;view=result.stage;editingIdentity=false;render();await history();}catch(error){$("#identity-edit-error").textContent=error.message;button.disabled=false;}finally{busy=false;}
+    return;
+  }
   if(e.target.id!=="prospect-form")return;e.preventDefault();if(busy)return;busy=true;const button=e.target.querySelector("button[type=submit]");button.disabled=true;
   try{const r=await api("/api/runs",Object.fromEntries(new FormData(e.target)));await openRun(r.id);}catch(error){$("#form-error").textContent=error.message;button.disabled=false;}finally{busy=false;}
 });
@@ -202,9 +220,11 @@ document.addEventListener("click",async e=>{
   if(button.dataset.researchTab){researchTab=button.dataset.researchTab;render();$("#tab-"+researchTab).focus();return;}
   if(button.dataset.stage){view=button.dataset.stage;return render();}
   if(button.dataset.source!==undefined)return evidence(Number(button.dataset.source));
-  if(button.dataset.confirm!==undefined)return mutate("confirm",{candidate:Number(button.dataset.confirm),lookup_id:current.identity.lookup_id});
+  if(button.dataset.confirm!==undefined)return mutate("confirm",{candidate:Number(button.dataset.confirm),lookup_id:current.identity.lookup_id,allow_employer_conflict:button.dataset.allowConflict==="true"});
   const action=button.dataset.action;if(!action)return;
   if(action==="select-all-sources"){document.querySelectorAll("[data-draft-source]").forEach(el=>el.checked=true);updateSourceSelection();return;}
+  if(action==="edit-identity"){editingIdentity=true;render();$("#identity-company")?.focus();return;}
+  if(action==="cancel-identity-edit"){editingIdentity=false;render();return;}
   if(action==="add-source"){
     if(busy)return;
     const id=currentId,version=current.attempt,selected=selectedSources(),url=$("#source-url").value.trim();

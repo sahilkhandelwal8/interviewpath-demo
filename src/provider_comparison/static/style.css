@@ -588,6 +588,12 @@ textarea{
   margin:0;
   color:#526b59
 }
+.identity-edit{
+  margin:18px 0
+}
+.identity-edit .actions{
+  margin-top:14px
+}
 .source-button{
   border:1px solid #dce6df;
   background:white;

@@ -42,6 +42,10 @@ class Candidate(BaseModel):
         return not self.company_conflict_evidence and all(
             f.value and f.value.strip() and f.evidence for f in (self.name, self.company, self.role))
 
+    @property
+    def has_confirmable_fields(self) -> bool:
+        return all(f.value and f.value.strip() and f.evidence for f in (self.name, self.company, self.role))
+
 
 class MatchSummary(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -56,6 +60,7 @@ class Confirmation(BaseModel):
     lookup_fingerprint: str
     confirmed_at: datetime
     confirmed_by: str = Field(min_length=1)
+    resolved_prospect: Prospect | None = None
 
 
 class IdentityLookup(BaseModel):
@@ -145,7 +150,9 @@ def fingerprint(lookup: IdentityLookup) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def confirm_match(lookup: IdentityLookup, candidate_index: int, *, confirmed_by: str) -> IdentityLookup:
+def confirm_match(lookup: IdentityLookup, candidate_index: int, *, confirmed_by: str,
+                  allow_employer_conflict: bool = False,
+                  resolved_prospect: Prospect | None = None) -> IdentityLookup:
     if not confirmed_by.strip():
         raise ValueError("The confirming user is required")
     if lookup.result is None or not lookup.calls or any(not c.success for c in lookup.calls):
@@ -153,11 +160,15 @@ def confirm_match(lookup: IdentityLookup, candidate_index: int, *, confirmed_by:
     validate_matches(lookup.result, lookup.sources)
     if not 0 <= candidate_index < len(lookup.result.candidates):
         raise ValueError("Select an available candidate")
-    if not lookup.result.candidates[candidate_index].can_confirm:
+    candidate = lookup.result.candidates[candidate_index]
+    if not candidate.can_confirm and not (allow_employer_conflict and candidate.has_confirmable_fields):
         raise ValueError("Name, current company and role need evidence without unresolved employer differences; edit details and search again")
+    if resolved_prospect and any(not getattr(resolved_prospect, field).strip() for field in ("name", "company", "role")):
+        raise ValueError("Resolved prospect needs a name, company and role")
     return lookup.model_copy(update={"confirmation": Confirmation(
         candidate_index=candidate_index, lookup_fingerprint=fingerprint(lookup),
         confirmed_at=datetime.now(UTC), confirmed_by=confirmed_by.strip(),
+        resolved_prospect=resolved_prospect,
     )}, deep=True)
 
 
@@ -166,7 +177,10 @@ def confirmed_prospect(lookup: IdentityLookup) -> Prospect:
     if confirmation is None or confirmation.lookup_fingerprint != fingerprint(lookup):
         raise ValueError("User confirmation is missing or stale; confirm the current lookup")
     # Recheck source validity and selection when loading a saved handoff.
-    confirm_match(lookup, confirmation.candidate_index, confirmed_by=confirmation.confirmed_by)
+    confirm_match(lookup, confirmation.candidate_index, confirmed_by=confirmation.confirmed_by,
+                  allow_employer_conflict=True)
+    if confirmation.resolved_prospect:
+        return confirmation.resolved_prospect
     candidate = lookup.result.candidates[confirmation.candidate_index]
     return Prospect(id=lookup.supplied.id, name=candidate.name.value,
                     company=candidate.company.value, role=candidate.role.value,
@@ -193,7 +207,8 @@ def presentation(lookup: IdentityLookup) -> dict[str, Any]:
         "entered": lookup.supplied.model_dump(mode="json"),
         "summary": lookup.result.summary if lookup.result else "We couldn't complete the lookup. Please try again.",
         "explanation_evidence": [ref.model_dump() for ref in lookup.result.explanation_evidence] if lookup.result else [],
-        "candidates": [dict(index=i, **c.model_dump(mode="json"), can_confirm=bool(healthy and c.can_confirm))
+        "candidates": [dict(index=i, **c.model_dump(mode="json"), can_confirm=bool(healthy and c.can_confirm),
+                            can_confirm_with_clarification=bool(healthy and c.has_confirmable_fields))
                        for i, c in enumerate(lookup.result.candidates if lookup.result else [])],
         "sources": [s.model_dump(mode="json") for s in lookup.sources if s.page_id in cited_ids],
         "confirmation_label": "Confirmed by you" if confirmed else None,

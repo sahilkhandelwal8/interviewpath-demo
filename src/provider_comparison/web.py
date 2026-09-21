@@ -111,7 +111,7 @@ class Workspace:
                          created_at=r["created_at"], updated_at=r["updated_at"])
                     for r in sorted(self.runs.values(), key=lambda r: r["created_at"], reverse=True)]
 
-    def create(self, data):
+    def prospect_from_data(self, data, run_id):
         name, company = str(data.get("name", "")).strip(), str(data.get("company", "")).strip()
         role = str(data.get("role", "")).strip()
         profile = str(data.get("profile_url", "")).strip()
@@ -121,8 +121,11 @@ class Workspace:
             raise ValueError("Enter the prospect’s role (up to 200 characters).")
         if profile and (urlparse(profile).scheme not in {"http", "https"} or not urlparse(profile).hostname or len(profile) > 2000):
             raise ValueError("Enter a valid profile URL starting with https://.")
+        return Prospect(id=run_id, name=name, company=company, role=role, profile_url=profile or None)
+
+    def create(self, data):
         run_id = uuid.uuid4().hex
-        prospect = Prospect(id=run_id, name=name, company=company, role=role, profile_url=profile or None)
+        prospect = self.prospect_from_data(data, run_id)
         run = dict(id=run_id, created_at=now(), updated_at=now(), prospect=prospect.model_dump(),
                    stage="identify", status="running", stage_started_at=now(), identity=None,
                    areas={}, research=None, output=None, edits=None, error=None, attempt=0,
@@ -163,10 +166,23 @@ class Workspace:
                 lookup = IdentityLookup.model_validate(read_json(self.directory / run_id / "lookup.json"))
                 if data.get("lookup_id") != lookup.lookup_id:
                     raise ValueError("The identity lookup changed. Refresh before confirming.")
-                lookup = confirm_match(lookup, int(data["candidate"]), confirmed_by="local-workspace-user")
+                lookup = confirm_match(lookup, int(data["candidate"]), confirmed_by="local-workspace-user",
+                                       allow_employer_conflict=bool(data.get("allow_employer_conflict")))
                 write_json(self.directory / run_id / "confirmed.json", lookup)
                 run["identity"] = presentation(lookup)
                 run["prospect"] = confirmed_prospect(lookup).model_dump(mode="json")
+                stage = "research"
+            elif action == "update":
+                if run["stage"] != "identify" or run["status"] not in {"needs_input", "failed"}:
+                    raise ValueError("Details can be edited while identity is awaiting your input.")
+                prospect = self.prospect_from_data(data, run_id)
+                lookup = IdentityLookup.model_validate(read_json(self.directory / run_id / "lookup.json"))
+                candidate_index = int(data.get("candidate", 0))
+                lookup = confirm_match(lookup, candidate_index, confirmed_by="local-workspace-user",
+                                       allow_employer_conflict=True, resolved_prospect=prospect)
+                write_json(self.directory / run_id / "confirmed.json", lookup)
+                run["identity"] = presentation(lookup)
+                run["prospect"] = prospect.model_dump(mode="json")
                 stage = "research"
             elif action == "retry":
                 if run["status"] != "failed":
@@ -430,7 +446,7 @@ class Handler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/api/runs/([a-f0-9]{32})/sources", self.path)
             if match:
                 return self.reply(200, asyncio.run(self.workspace.add_source(match[1], data)))
-            match = re.fullmatch(r"/api/runs/([a-f0-9]{32})/(confirm|retry|research|save|regenerate|approve)", self.path)
+            match = re.fullmatch(r"/api/runs/([a-f0-9]{32})/(confirm|update|retry|research|save|regenerate|approve)", self.path)
             if match:
                 return self.reply(200, self.workspace.action(match[1], match[2], data))
             return self.reply(404, {"error": "Not found"})
