@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any
@@ -74,6 +75,78 @@ class IdentityLookup(BaseModel):
 
 class IdentityEvidenceError(ValueError):
     """The model's match cannot be supported by the supplied passages."""
+
+
+def reconcile_evidence(result: MatchSummary, sources: list[RetrievedPage]) -> MatchSummary:
+    """Recover presentation differences, then retain only source-backed fields.
+
+    This runs once on model output, never on a previously confirmed handoff.
+    Recovered quotations use the original passage, including omitted qualifiers.
+    The raw model response remains in the lookup artifact for inspection.
+    """
+    result = result.model_copy(deep=True)
+    passages = {s.page_id: s.content for s in sources if s.usable}
+
+    def normalize(text):
+        return " ".join(text.translate(str.maketrans({
+            "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+        })).split())
+
+    def reconcile(refs):
+        supported = []
+        for ref in refs:
+            passage = passages.get(ref.source_id, "")
+            if not passage or not ref.quote.strip():
+                continue
+            if ref.quote in passage:
+                supported.append(ref)
+                continue
+            quote, source = normalize(ref.quote), normalize(passage)
+            if quote in source:
+                supported.append(ref.model_copy(update={"quote": passage}))
+                continue
+            # Ellipses may omit text, but cannot invent or reorder it. Keep the
+            # entire original passage rather than endorse the model's abridgment.
+            parts = [part.strip() for part in re.split(r"\.{3,}|\u2026", quote) if part.strip()]
+            if len(parts) < 2:
+                continue
+            position = 0
+            for part in parts:
+                start = source.find(part, position)
+                if start < 0:
+                    break
+                position = start + len(part)
+            else:
+                supported.append(ref.model_copy(update={"quote": passage}))
+        return supported
+
+    explanations = reconcile(result.explanation_evidence)
+    lost_explanation = len(explanations) != len(result.explanation_evidence)
+    result.explanation_evidence = explanations
+    incomplete = False
+    for candidate in result.candidates:
+        reported_conflict = bool(candidate.company_conflict_evidence)
+        candidate.company_conflict_evidence = reconcile(candidate.company_conflict_evidence)
+        for field in (candidate.name, candidate.company, candidate.role):
+            field.evidence = reconcile(field.evidence) if field.value and field.value.strip() else []
+            if not field.evidence:
+                field.value = None
+                incomplete = True
+        # An unquotable employer conflict still needs clarification; dropping its
+        # citation must never turn a reported mismatch into a confirmable match.
+        if reported_conflict and not candidate.company_conflict_evidence:
+            candidate.company = MatchedField(value=None, evidence=[])
+            candidate.note = "The employer information needs clarification. Check the company or add a profile link."
+            incomplete = True
+        elif not all(field.value for field in (candidate.name, candidate.company, candidate.role)):
+            candidate.note = "Some identity details could not be established from the available sources."
+        elif lost_explanation:
+            candidate.note = ""
+    if incomplete:
+        result.summary = "We found partial identity information. Review the available details and clarify anything missing."
+    elif lost_explanation:
+        result.summary = "Review the person, company and role against the supporting sources." if result.candidates else "The available sources did not establish a match. Check the details or add a profile link."
+    return result
 
 
 def validate_matches(result: MatchSummary, sources: list[RetrievedPage]) -> None:
@@ -192,7 +265,7 @@ async def summarize_lookup(lookup: IdentityLookup, settings: Settings, *, client
             call.usage = usage.model_dump(mode="json") if hasattr(usage, "model_dump") else dict(usage or {})
             if getattr(response, "status", "completed") != "completed":
                 raise ValueError("Incomplete model response")
-            result = MatchSummary.model_validate_json(lookup.raw_response)
+            result = reconcile_evidence(MatchSummary.model_validate_json(lookup.raw_response), lookup.sources)
             validate_matches(result, lookup.sources)
             lookup.result = result
             call.success = True
