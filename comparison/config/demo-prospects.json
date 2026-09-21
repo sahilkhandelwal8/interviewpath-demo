@@ -1,0 +1,57 @@
+[
+  {
+    "id": "P01",
+    "name": "Sasa Ferrari",
+    "company": "Ironclad",
+    "role": "VP of Global Talent Acquisition",
+    "profile_url": "https://www.linkedin.com/in/sasa-ferrari-talent",
+    "scenario": "Clear starting point",
+    "evidence": "A well-documented prospect who already uses hiring analytics",
+    "detail": "Ironclad has published information about Sasa’s role, its growth and its interview process. It also describes her team reviewing recruiting metrics in Ashby.",
+    "demonstrates": "Show a grounded first draft that acknowledges the team’s existing tools instead of assuming they lack visibility into hiring."
+  },
+  {
+    "id": "P03",
+    "name": "Adam Ward",
+    "company": "Cursor",
+    "role": "Head of Talent",
+    "profile_url": "https://www.linkedin.com/in/adampward",
+    "scenario": "Company names don’t match",
+    "evidence": "Cursor in one source, SpaceXAI in another",
+    "detail": "Adam’s profile heading names SpaceXAI, while his own posts describe leading recruiting at Cursor. Cursor’s acquisition announcement helps explain the different names.",
+    "demonstrates": "Show how the identity check handles an apparent employer mismatch. It should explain the relationship or flag uncertainty, rather than guess that he changed jobs."
+  },
+  {
+    "id": "P04",
+    "name": "Don Fogarty",
+    "company": "Attio",
+    "role": "Head of Talent",
+    "profile_url": "https://www.linkedin.com/in/donaldfogarty",
+    "scenario": "Same name, different people",
+    "evidence": "Make sure the research belongs to the right Don",
+    "detail": "The Attio talent leader uses the LinkedIn handle /donaldfogarty. A different Don Fogarty, associated with Tango, uses /donfogarty. Searching by name alone can mix them up.",
+    "demonstrates": "Show the identity confirmation step and check the company and profile before continuing. The supplied profile link helps distinguish the two people."
+  },
+  {
+    "id": "P05",
+    "name": "Robert Galas",
+    "company": "Shapr3D",
+    "role": "Head of Talent Acquisition",
+    "profile_url": "https://es.linkedin.com/in/robert-galas",
+    "scenario": "Incomplete public information",
+    "evidence": "Enough context to explore, with important gaps",
+    "detail": "Prior research found his role and Shapr3D’s published interview process, but no clear recent hiring-expansion announcement. The careers page returned placeholder text instead of a reliable list of openings.",
+    "demonstrates": "Show a restrained draft based on what the sources do establish. It should avoid inventing hiring growth, a vacancy count or problems in the team’s process."
+  },
+  {
+    "id": "P06",
+    "name": "Doug Parker",
+    "company": "Linear",
+    "role": "Head of Talent",
+    "profile_url": "https://www.linkedin.com/in/dougparker33",
+    "scenario": "A ‘hire faster’ pitch won’t fit",
+    "evidence": "This team deliberately takes time to evaluate candidates",
+    "detail": "Doug’s LinkedIn career details are limited, but his article on Linear’s website explains its hiring process: paid work trials, independent feedback and an emphasis on quality over speed.",
+    "demonstrates": "Show research going beyond LinkedIn and a draft that respects the team’s priorities. Coordination or feedback may be worth discussing; faster decisions should not be assumed to be the goal."
+  }
+]

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Outreach · InterviewPath</title><link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" aria-label="Run history">
+      <a class="brand" href="#new"><span class="brand-icon">ip</span><span>InterviewPath<small>OUTREACH WORKSPACE</small></span></a>
+      <button class="new-button" id="new-run"><span>＋</span> New prospect</button>
+      <button class="brief-button" id="product-brief">Product brief <span>↗</span></button>
+      <div class="history-heading">RECENT RUNS <span id="run-count">0</span></div>
+      <nav id="history" aria-label="Recent runs"></nav>
+    </aside>
+    <main id="main"></main>
+  </div>
+  <dialog id="brief" aria-labelledby="brief-title"><div class="drawer-head"><span class="eyebrow">PRODUCT BRIEF</span><button id="close-brief" class="icon-button" aria-label="Close product brief">×</button></div><article id="brief-content" class="brief-content"></article></dialog>
+  <div id="notice" role="status" aria-live="polite"></div>
+  <div id="connection-message" role="status" hidden>Connection lost. Your visible results are preserved. Reconnecting…</div>
+  <dialog id="evidence"><div class="drawer-head"><span class="eyebrow">SUPPORTING EVIDENCE</span><button id="close-evidence" class="icon-button" aria-label="Close evidence">×</button></div><div id="evidence-content"></div></dialog>
+</body>
+</html>

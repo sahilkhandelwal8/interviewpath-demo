@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: interviewpath
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt && pip install -e .
+    startCommand: python -m provider_comparison.web --host 0.0.0.0 --data-dir /tmp/interviewpath-runs
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: DEMO_PASSWORD
+        generateValue: true
+      - key: FIRECRAWL_API_KEY
+        sync: false
+      - key: EXA_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
