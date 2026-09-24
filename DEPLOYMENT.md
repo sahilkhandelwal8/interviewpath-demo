@@ -43,10 +43,53 @@ For a two-day submission, send the evaluator the link, demo credentials, and a
 short note that the first load may take about a minute. Do not rely on this tier
 to preserve completed runs. See [Render's current free-tier limits](https://render.com/docs/free).
 
-## Local or tunnel use
+## Tunnel demo
 
-Local use remains `python -m provider_comparison.web` on port 8765.
-For a tunnel, set `DEMO_PASSWORD` and pass `--public-origin https://your-exact-host`.
-Use `--data-dir tmp/tunnel-demo` for a fresh workspace. Keep the server and tunnel
-running; the allowed origin must match the tunnel URL exactly. No wildcard hosts
-or arbitrary forwarded origins are accepted.
+The fastest public demo path is a local server plus `cloudflared` or `ngrok`.
+This avoids the Render loop entirely: no `tmp/` compile step, commit, push, or
+remote deploy check.
+
+Install one tunnel CLI:
+
+```powershell
+winget install --id Cloudflare.cloudflared
+# or
+winget install --id Ngrok.Ngrok
+```
+
+Then run:
+
+```powershell
+.\scripts\tunnel-demo.ps1 -Provider cloudflared
+# or
+.\scripts\tunnel-demo.ps1 -Provider ngrok
+```
+
+The script prints the public HTTPS URL and demo credentials. Send the evaluator:
+
+- URL: the printed `https://...` tunnel URL
+- Username: `demo`
+- Password: the printed password
+
+Keep that PowerShell window open for the whole review session. When it closes,
+the public URL stops working. Run data is stored in `tmp/tunnel-demo`, which is
+intentionally ignored by git.
+
+For a stable paid/reserved tunnel hostname, pass the hostname and optional
+password explicitly:
+
+```powershell
+$env:DEMO_PASSWORD = "use-a-random-password-of-at-least-16-chars"
+.\scripts\tunnel-demo.ps1 -Provider cloudflared -HostName demo.example.com
+.\scripts\tunnel-demo.ps1 -Provider ngrok -HostName demo.example.com
+```
+
+Local-only use remains:
+
+```powershell
+python -m provider_comparison.web
+```
+
+The server only trusts `localhost` by default. A public tunnel must pass
+`--public-origin` with the exact public HTTPS origin, and the script does that
+automatically after it discovers the tunnel URL.

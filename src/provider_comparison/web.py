@@ -6,6 +6,7 @@ import asyncio
 import base64
 import copy
 import json
+import logging
 import ipaddress
 import os
 import re
@@ -46,7 +47,9 @@ def identity_error(lookup):
     if failed.status_code in (401, 403):
         return f"Access to {service} was denied. Check the configured API key and permissions."
     if failed.status_code == 429:
-        return f"{service.capitalize()} reached a rate or usage limit. Check the account before retrying."
+        return f"{service.capitalize()} reached a rate or usage limit. The app will use its fallback model when available; retry after the limit resets."
+    if failed.status_code == 503:
+        return f"Gemini is temporarily unavailable (503 Service Unavailable). The app tried the configured model and a fallback; retry in a moment."
     if failed.operation == "search" and failed.status_code is None:
         return "Could not connect to Firecrawl search. Check this server’s network access, then retry. No identity assessment was made."
     return f"The request to {service} could not finish. Retry this stage."
@@ -304,7 +307,9 @@ class Workspace:
             lookup = await lookup_prospect(Prospect.model_validate(run["prospect"]), self.settings)
             write_json(folder / f"lookup-{attempt}.json", lookup)
             write_json(folder / "lookup.json", lookup)
-            healthy = lookup.result is not None and all(c.success for c in lookup.calls)
+            # Failed primary attempts are allowed when the fallback succeeds.
+            healthy = lookup.result is not None and lookup.calls and lookup.calls[-1].success
+            logging.getLogger(__name__).info("identity.complete run=%s healthy=%s model=%s calls=%s", run_id, healthy, lookup.model, [c.model_dump(mode="json") for c in lookup.calls])
             self.update(run_id, identity=presentation(lookup), status="needs_input" if healthy else "failed",
                         error=None if healthy else identity_error(lookup))
             return  # A human confirmation is always required before research.
@@ -380,8 +385,13 @@ class Handler(BaseHTTPRequestHandler):
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.end_headers()
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            # The browser may navigate away or cancel a request while the
+            # response is being written. There is nothing left to send.
+            pass
 
     def trusted(self):
         host = self.headers.get("Host", "")
@@ -490,6 +500,11 @@ def main():
         if not Handler.demo_password or len(Handler.demo_password) < 16:
             parser.error("Set DEMO_PASSWORD to at least 16 characters before enabling a public demo.")
     Handler.workspace = Workspace(args.data_dir)
+    log_path = args.data_dir / "workspace.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s",
+                        handlers=[logging.StreamHandler(), logging.FileHandler(log_path, encoding="utf-8")])
+    logging.getLogger(__name__).info("workspace started data_dir=%s", args.data_dir)
     try:
         server = WorkspaceServer((args.host, args.port), Handler)
     except OSError as exc:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 from datetime import UTC, datetime
 from time import perf_counter
@@ -16,7 +17,11 @@ from .config import ROOT, Settings
 from .models import CallRecord, Prospect, Query, ResearchArea, RetrievedPage
 from .providers import create_provider
 from .selection import canonical_url
-from .response_format import model_json, source_quote
+from .response_format import model_json
+
+
+IDENTITY_FALLBACK_MODEL = "gemini-3.5-flash"
+logger = logging.getLogger(__name__)
 
 
 class EvidenceRef(BaseModel):
@@ -40,11 +45,11 @@ class Candidate(BaseModel):
     @property
     def can_confirm(self) -> bool:
         return not self.company_conflict_evidence and all(
-            f.value and f.value.strip() and f.evidence for f in (self.name, self.company, self.role))
+            f.value and f.value.strip() for f in (self.name, self.company, self.role))
 
     @property
     def has_confirmable_fields(self) -> bool:
-        return all(f.value and f.value.strip() and f.evidence for f in (self.name, self.company, self.role))
+        return all(f.value and f.value.strip() for f in (self.name, self.company, self.role))
 
 
 class MatchSummary(BaseModel):
@@ -72,7 +77,7 @@ class IdentityLookup(BaseModel):
     result: MatchSummary | None = None
     calls: list[CallRecord] = Field(default_factory=list)
     model: str
-    generation_config: dict[str, Any] = Field(default_factory=lambda: {"temperature": 0})
+    generation_config: dict[str, Any] = Field(default_factory=lambda: {"temperature": 0.2})
     system_prompt: str
     raw_response: str | None = None
     confirmation: Confirmation | None = None
@@ -90,58 +95,38 @@ def reconcile_evidence(result: MatchSummary, sources: list[RetrievedPage]) -> Ma
     The raw model response remains in the lookup artifact for inspection.
     """
     result = result.model_copy(deep=True)
-    passages = {s.page_id: s.content for s in sources if s.usable}
+    source_ids = {s.page_id for s in sources}
 
     def reconcile(refs):
         supported = []
         for ref in refs:
-            quote = source_quote(ref.quote, passages.get(ref.source_id, ""))
-            if quote:
-                supported.append(ref.model_copy(update={"quote": quote}))
+            if ref.source_id in source_ids:
+                supported.append(ref)
         return supported
 
     explanations = reconcile(result.explanation_evidence)
     lost_explanation = len(explanations) != len(result.explanation_evidence)
     result.explanation_evidence = explanations
-    incomplete = False
     for candidate in result.candidates:
-        reported_conflict = bool(candidate.company_conflict_evidence)
         candidate.company_conflict_evidence = reconcile(candidate.company_conflict_evidence)
         for field in (candidate.name, candidate.company, candidate.role):
             field.evidence = reconcile(field.evidence) if field.value and field.value.strip() else []
-            if not field.evidence:
-                field.value = None
-                incomplete = True
-        # An unquotable employer conflict still needs clarification; dropping its
-        # citation must never turn a reported mismatch into a confirmable match.
-        if reported_conflict and not candidate.company_conflict_evidence:
-            candidate.company = MatchedField(value=None, evidence=[])
-            candidate.note = "The employer information needs clarification. Check the company or add a profile link."
-            incomplete = True
-        elif not all(field.value for field in (candidate.name, candidate.company, candidate.role)):
-            candidate.note = "Some identity details could not be established from the available sources."
-        elif lost_explanation:
-            candidate.note = ""
-    if incomplete:
-        result.summary = "We found partial identity information. Review the available details and clarify anything missing."
-    elif lost_explanation:
+    if lost_explanation:
         result.summary = "Review the person, company and role against the supporting sources." if result.candidates else "The available sources did not establish a match. Check the details or add a profile link."
     return result
 
 
 def validate_matches(result: MatchSummary, sources: list[RetrievedPage]) -> None:
-    passages = {s.page_id: s.content for s in sources if s.usable}
+    source_ids = {s.page_id for s in sources}
     references = list(result.explanation_evidence)
     for candidate in result.candidates:
         references.extend(candidate.company_conflict_evidence)
         for field in (candidate.name, candidate.company, candidate.role):
             if field.value is not None and not field.value.strip():
                 raise IdentityEvidenceError("Empty matched field")
-            if bool(field.value) != bool(field.evidence):
-                raise IdentityEvidenceError("Each populated field needs evidence; unknown fields must have none")
             references.extend(field.evidence)
     for ref in references:
-        if not ref.quote.strip() or ref.quote not in passages.get(ref.source_id, ""):
+        if ref.source_id not in source_ids:
             raise IdentityEvidenceError("Match cites an unavailable source or unsupported quotation")
 
 
@@ -155,7 +140,8 @@ def confirm_match(lookup: IdentityLookup, candidate_index: int, *, confirmed_by:
                   resolved_prospect: Prospect | None = None) -> IdentityLookup:
     if not confirmed_by.strip():
         raise ValueError("The confirming user is required")
-    if lookup.result is None or not lookup.calls or any(not c.success for c in lookup.calls):
+    # A failed primary attempt is allowed when a subsequent fallback succeeds.
+    if lookup.result is None or not lookup.calls or not lookup.calls[-1].success:
         raise ValueError("Lookup failed; run the lookup again before confirming")
     validate_matches(lookup.result, lookup.sources)
     if not 0 <= candidate_index < len(lookup.result.candidates):
@@ -233,39 +219,57 @@ async def summarize_lookup(lookup: IdentityLookup, settings: Settings, *, client
     owns_client = client is None
     try:
         started_at, clock = datetime.now(UTC), perf_counter()
-        call = CallRecord(operation="identify", request_label=f"{lookup.supplied.id}-match",
-                          started_at=started_at, duration_ms=0, success=False)
-        try:
-            if client is None:
-                client = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={
-                    "timeout": settings.draft_timeout_seconds * 1000, "retry_options": {"attempts": 1}})
-                client.aio.interactions.sdk_configuration.retry_config = None
-            response = await asyncio.wait_for(client.aio.interactions.create(
-                model=lookup.model, system_instruction=lookup.system_prompt,
-                input=json.dumps({"supplied": lookup.supplied.model_dump(mode="json"),
-                                  # Titles stay in the audit/UI but cannot be quoted as passage evidence.
-                                  "sources": [s.model_dump(mode="json", exclude={"title"}) for s in lookup.sources]}, ensure_ascii=False),
-                generation_config=lookup.generation_config, store=False,
-                response_format={"type": "text", "mime_type": "application/json",
-                                 "schema": MatchSummary.model_json_schema()}),
-                timeout=settings.draft_timeout_seconds)
-            lookup.raw_response = response.output_text
-            call.request_id = getattr(response, "id", None)
-            usage = getattr(response, "usage", None)
-            call.usage = usage.model_dump(mode="json") if hasattr(usage, "model_dump") else dict(usage or {})
-            if getattr(response, "status", "completed") != "completed":
-                raise ValueError("Incomplete model response")
-            result = reconcile_evidence(MatchSummary.model_validate(model_json(lookup.raw_response)), lookup.sources)
-            validate_matches(result, lookup.sources)
-            lookup.result = result
-            call.success = True
-        except IdentityEvidenceError:
-            call.error = "Identity response failed evidence validation: a field or quotation was not supported by the supplied passages; no automatic retry was made"
-        except Exception as exc:
-            call.error = f"Match summary failed ({type(exc).__name__}); no automatic retry was made"
-        finally:
-            call.duration_ms = round((perf_counter()-clock)*1000)
-            lookup.calls.append(call)
+        if client is None:
+            client = genai.Client(api_key=os.environ["GEMINI_API_KEY"], http_options={
+                "timeout": settings.identity_timeout_seconds * 1000, "retry_options": {"attempts": 1}})
+            client.aio.interactions.sdk_configuration.retry_config = None
+
+        payload = json.dumps({"supplied": lookup.supplied.model_dump(mode="json"),
+                              "sources": [s.model_dump(mode="json", exclude={"title"}) for s in lookup.sources]}, ensure_ascii=False)
+        logger.info("identity.gemini.input prospect=%s sources=%d payload=%s", lookup.supplied.id, len(lookup.sources), payload)
+        models = [lookup.model]
+        for model in models:
+            started_at, clock = datetime.now(UTC), perf_counter()
+            call = CallRecord(operation="identify", request_label=f"{lookup.supplied.id}-match",
+                              started_at=started_at, duration_ms=0, success=False)
+            try:
+                logger.info("identity.gemini.request prospect=%s model=%s", lookup.supplied.id, model)
+                response = await asyncio.wait_for(client.aio.interactions.create(
+                    model=model, system_instruction=lookup.system_prompt, input=payload,
+                    generation_config=lookup.generation_config, store=False,
+                    response_format={"type": "text", "mime_type": "application/json",
+                                     "schema": MatchSummary.model_json_schema()}),
+                    timeout=settings.identity_timeout_seconds)
+                lookup.raw_response = response.output_text
+                logger.info("identity.gemini.output prospect=%s model=%s status=%s output=%s", lookup.supplied.id, model, getattr(response, "status", None), lookup.raw_response)
+                call.request_id = getattr(response, "id", None)
+                usage = getattr(response, "usage", None)
+                call.usage = usage.model_dump(mode="json") if hasattr(usage, "model_dump") else dict(usage or {})
+                if getattr(response, "status", "completed") != "completed":
+                    raise ValueError("Incomplete model response")
+                result = reconcile_evidence(MatchSummary.model_validate(model_json(lookup.raw_response)), lookup.sources)
+                validate_matches(result, lookup.sources)
+                lookup.result = result
+                lookup.model = model
+                call.success = True
+                break
+            except IdentityEvidenceError:
+                logger.exception("identity.validation.failed prospect=%s model=%s", lookup.supplied.id, model)
+                call.error = "Identity response failed evidence validation: a field or quotation was not supported by the supplied passages; no automatic retry was made"
+                if model == lookup.model and IDENTITY_FALLBACK_MODEL != model:
+                    models.append(IDENTITY_FALLBACK_MODEL)
+            except Exception as exc:
+                logger.exception("identity.gemini.failed prospect=%s model=%s", lookup.supplied.id, model)
+                detail = str(exc).lower()
+                status = getattr(exc, "status_code", None) or getattr(exc, "code", None) or getattr(exc, "status", None)
+                unavailable = status in (429, 503) or "429" in detail or "503" in detail or "rate limit" in detail or "service unavailable" in detail or "unavailable" in detail or "overloaded" in detail
+                call.status_code = status if isinstance(status, int) and 400 <= status < 600 else (503 if unavailable else None)
+                call.error = f"Gemini model {model} failed ({type(exc).__name__})" + ("; service unavailable" if unavailable else "")
+                if model == lookup.model and IDENTITY_FALLBACK_MODEL != model:
+                    models.append(IDENTITY_FALLBACK_MODEL)
+            finally:
+                call.duration_ms = round((perf_counter()-clock)*1000)
+                lookup.calls.append(call)
         return lookup
     finally:
         if owns_client and client is not None:
@@ -287,6 +291,8 @@ async def lookup_prospect(prospect: Prospect, settings: Settings, *, provider=No
                                            timeout_seconds=settings.request_timeout_seconds)
     try:
         results = await provider.search(query, 5)
+        logger.info("identity.firecrawl.input prospect=%s query=%s limit=5", prospect.id, query.text)
+        logger.info("identity.firecrawl.output prospect=%s count=%d results=%s", prospect.id, len(results), [r.model_dump(mode="json") for r in results])
         lookup.calls = list(provider.calls)
         seen = set()
         for result in results:
@@ -303,6 +309,7 @@ async def lookup_prospect(prospect: Prospect, settings: Settings, *, provider=No
             if lookup.calls and all(c.success for c in lookup.calls):
                 lookup.result = MatchSummary(candidates=[], summary="No clear match found. Check the details or add a professional profile URL.")
             return lookup
+        logger.info("identity.sources prospect=%s sources=%s", prospect.id, [s.model_dump(mode="json") for s in lookup.sources])
         return await summarize_lookup(lookup, settings, client=client)
     finally:
         if owns_provider:

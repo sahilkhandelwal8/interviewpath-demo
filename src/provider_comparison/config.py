@@ -22,6 +22,7 @@ class Settings(BaseModel):
     max_pages: int = Field(ge=1, le=8)
     max_chars_per_page: int = Field(ge=1000)
     draft_timeout_seconds: int = Field(gt=0)
+    identity_timeout_seconds: int = Field(gt=0)
     request_timeout_seconds: int = Field(gt=0)
     repetitions: int = Field(ge=1, le=3)
     gemini_model: str
@@ -47,7 +48,9 @@ def write_json(path: Path, value: Any) -> None:
 
 
 def load_project_env() -> None:
-    load_dotenv(ROOT / ".env", override=False)
+    # Local .env is the explicit source for this checkout. In particular,
+    # allow a newly rotated local key to replace a stale inherited shell value.
+    load_dotenv(ROOT / ".env", override=True)
 
 
 def load_settings(path: Path | None = None) -> Settings:
